@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jupyterling</title>
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Courier New', monospace; background: #0d1117; color: #c9d1d9; }
+    #header { padding: 10px 20px; background: #161b22; border-bottom: 1px solid #30363d; font-weight: bold; color: #58a6ff; }
+    #notebook { max-width: 900px; margin: 20px auto; padding: 0 20px; }
+    .cell { display: flex; align-items: flex-start; margin-bottom: 8px; }
+    .gutter { width: 28px; flex-shrink: 0; display: flex; justify-content: center; padding-top: 5px; }
+    .snake { font-size: 16px; }
+    .snake-hidden { opacity: 0; }
+    .snake-still { opacity: 1; }
+    .snake-moving { opacity: 1; animation: slither 200ms ease-in-out infinite alternate; }
+    @keyframes slither {
+      from { transform: rotate(-15deg) translateY(-1px); }
+      to   { transform: rotate( 15deg) translateY( 1px); }
+    }
+    .cell-inner { flex: 1; border: 2px solid transparent; border-radius: 6px; }
+    .cell-inner.selected { border-color: #f0c040; }
+    textarea {
+      display: block; width: 100%; padding: 6px 10px;
+      background: #0d1117; color: #c9d1d9;
+      border: 1px solid #30363d; border-radius: 4px;
+      font: 13px/1.5 'Courier New', monospace;
+      resize: none; overflow: hidden;
+    }
+    textarea:focus { outline: none; border-color: #58a6ff44; }
+    .result {
+      padding: 4px 10px 4px 12px; margin-top: 2px;
+      font-size: 13px; line-height: 1.4;
+      white-space: pre-wrap; word-break: break-all;
+      border-left: 3px solid transparent; border-radius: 0 3px 3px 0;
+    }
+    .result-ok    { border-left-color: #3fb950; color: #c9d1d9; }
+    .result-err   { border-left-color: #f85149; color: #ffa198; }
+    .result-stale { border-left-color: #30363d; color: #484f58; }
+    #toolbar { max-width: 900px; margin: 8px auto; padding: 0 20px 20px; }
+    button {
+      padding: 5px 14px; background: #21262d; color: #c9d1d9;
+      border: 1px solid #30363d; border-radius: 4px;
+      cursor: pointer; font: 12px monospace;
+    }
+    button:hover { background: #30363d; }
+    #loading {
+      position: fixed; inset: 0; background: #0d1117;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.3em; z-index: 10;
+    }
+    #notebook.busy { pointer-events: none; opacity: 0.85; }
+  </style>
+</head>
+<body>
+  <div id="loading">Loading Python &#x1f40d;</div>
+  <div id="header">&#x1f40d; Jupyterling</div>
+  <div id="notebook"></div>
+  <div id="toolbar"><button id="btn-add">+ Add Cell</button></div>
+
+  <script>
+  'use strict';
+
+  const PY = `
+import io, sys, traceback
+
+_states = {}
+_sid_ctr = [0]
+
+def _alloc(base):
+    sid = _sid_ctr[0]; _sid_ctr[0] += 1
+    _states[sid] = dict(_states[base]) if base in _states else {'__builtins__': __builtins__}
+    return sid
+
+_initial = _alloc(-1)
+
+def run_cell(prev_sid, code):
+    sid = _alloc(prev_sid)
+    g = _states[sid]
+    buf = io.StringIO()
+    sys.stdout, old = buf, sys.stdout
+    result = err = ''
+    try:
+        s = code.strip()
+        if s:
+            try:
+                v = eval(compile(s, '<cell>', 'eval'), g)
+                if v is not None: result = repr(v)
+            except SyntaxError:
+                exec(compile(s, '<cell>', 'exec'), g)
+    except:
+        err = traceback.format_exc()
+    finally:
+        sys.stdout = old
+    return [sid, result, buf.getvalue(), err]
+`;
+
+  // State
+  let cells = [];      // { code, result, output, error, hasResult }
+  let sids = [];       // sids[i] = Python state ID after cell i
+  let selected = 0;
+  let evalUpTo = -1;   // cells 0..evalUpTo are fresh
+  let computing = -1;  // cell index being computed, or -1
+  let pyodide, initialSid;
+
+  function newCell() {
+    return { code: '', result: '', output: '', error: '', hasResult: false };
+  }
+
+  function insertCell(afterIdx) {
+    if (afterIdx === null) afterIdx = cells.length - 1;
+    cells.splice(afterIdx + 1, 0, newCell());
+    sids = sids.slice(0, afterIdx + 1);
+    evalUpTo = Math.min(evalUpTo, afterIdx);
+    selected = afterIdx + 1;
+  }
+
+  function deleteCell(idx) {
+    if (cells.length === 1) {
+      cells[0] = newCell(); sids = []; evalUpTo = -1; return;
+    }
+    cells.splice(idx, 1);
+    sids = sids.slice(0, idx);
+    evalUpTo = Math.min(evalUpTo, idx - 1);
+    selected = Math.min(idx, cells.length - 1);
+  }
+
+  function markStale(fromIdx) {
+    sids = sids.slice(0, fromIdx);
+    evalUpTo = Math.min(evalUpTo, fromIdx - 1);
+  }
+
+  // Runner
+  async function runUpTo(toIdx) {
+    if (computing >= 0) return;
+    const from = Math.min(evalUpTo + 1, toIdx);
+    for (let i = from; i <= toIdx; i++) {
+      computing = i;
+      render();
+      const prevSid = (i > 0 && sids[i - 1] != null) ? sids[i - 1] : initialSid;
+      pyodide.globals.set('_s', prevSid);
+      pyodide.globals.set('_c', cells[i].code);
+      let arr;
+      try {
+        const proxy = await pyodide.runPythonAsync('run_cell(_s, _c)');
+        arr = proxy.toJs(); proxy.destroy();
+      } catch (e) {
+        arr = [prevSid, '', '', String(e)];
+      }
+      const [sid, result, output, error] = arr;
+      sids[i] = sid;
+      Object.assign(cells[i], { result, output, error, hasResult: true });
+      evalUpTo = i;
+    }
+    computing = -1;
+    render();
+  }
+
+  // Keyboard
+  function handleKey(e, i) {
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const t = e.target, s = t.selectionStart, en = t.selectionEnd;
+      t.value = t.value.slice(0, s) + '    ' + t.value.slice(en);
+      t.selectionStart = t.selectionEnd = s + 4;
+      cells[i].code = t.value;
+    } else if (ctrl && e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (i > 0) { selected = i - 1; render(); focusCell(selected); }
+    } else if (ctrl && e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (i < cells.length - 1) { selected = i + 1; render(); focusCell(selected); }
+    } else if (ctrl && e.key === 'Enter') {
+      e.preventDefault();
+      runUpTo(i);
+    } else if (ctrl && e.key === 'Delete') {
+      e.preventDefault();
+      deleteCell(i);
+      render(); focusCell(selected);
+    } else if (e.shiftKey && e.key === 'Enter') {
+      e.preventDefault();
+      if (i === cells.length - 1) insertCell(i);
+      else selected = i + 1;
+      runUpTo(i).then(() => focusCell(selected));
+    }
+  }
+
+  // Render
+  function render() {
+    const ae = document.activeElement;
+    let fi = -1, ss = 0, se = 0;
+    if (ae && ae.tagName === 'TEXTAREA') {
+      fi = +ae.dataset.i; ss = ae.selectionStart; se = ae.selectionEnd;
+    }
+
+    const nb = document.getElementById('notebook');
+    nb.className = computing >= 0 ? 'busy' : '';
+    nb.innerHTML = '';
+
+    cells.forEach((cell, i) => {
+      const fresh = i <= evalUpTo;
+
+      const row = document.createElement('div');
+      row.className = 'cell';
+
+      // Gutter
+      const gutter = document.createElement('div');
+      gutter.className = 'gutter';
+      const snake = document.createElement('span');
+      snake.textContent = '\u{1F40D}';
+      if (i === computing) snake.className = 'snake snake-moving';
+      else if (computing < 0 && i === evalUpTo) snake.className = 'snake snake-still';
+      else snake.className = 'snake snake-hidden';
+      gutter.appendChild(snake);
+
+      // Inner
+      const inner = document.createElement('div');
+      inner.className = 'cell-inner' + (i === selected ? ' selected' : '');
+
+      const ta = document.createElement('textarea');
+      ta.value = cell.code;
+      ta.dataset.i = i;
+      ta.rows = Math.max(1, (cell.code.match(/\n/g) || []).length + 1);
+      ta.spellcheck = false;
+      ta.addEventListener('input', ev => {
+        cells[i].code = ev.target.value;
+        ev.target.rows = Math.max(1, (ev.target.value.match(/\n/g) || []).length + 1);
+        markStale(i);
+        refreshStale();
+        refreshSnake();
+      });
+      ta.addEventListener('focus', () => {
+        if (selected === i) return;
+        selected = i;
+        document.querySelectorAll('.cell-inner').forEach((el, j) =>
+          el.classList.toggle('selected', j === i));
+      });
+      ta.addEventListener('keydown', ev => handleKey(ev, i));
+      inner.appendChild(ta);
+
+      // Result
+      if (cell.hasResult) {
+        const text = cell.error
+          ? cell.error.trim()
+          : (cell.output + cell.result).trimEnd();
+        if (text) {
+          const res = document.createElement('div');
+          if (cell.error) res.className = fresh ? 'result result-err' : 'result result-stale';
+          else res.className = fresh ? 'result result-ok' : 'result result-stale';
+          res.textContent = text;
+          inner.appendChild(res);
+        }
+      }
+
+      row.appendChild(gutter);
+      row.appendChild(inner);
+      nb.appendChild(row);
+    });
+
+    if (fi >= 0 && fi < cells.length) {
+      const t = nb.querySelectorAll('textarea')[fi];
+      if (t) { t.focus(); try { t.setSelectionRange(ss, se); } catch (_) {} }
+    }
+  }
+
+  function refreshStale() {
+    document.querySelectorAll('.cell').forEach((row, i) => {
+      const res = row.querySelector('.result');
+      if (!res) return;
+      const fresh = i <= evalUpTo;
+      const cell = cells[i];
+      if (cell.error) res.className = fresh ? 'result result-err' : 'result result-stale';
+      else res.className = fresh ? 'result result-ok' : 'result result-stale';
+    });
+  }
+
+  function refreshSnake() {
+    document.querySelectorAll('.snake').forEach((el, i) => {
+      if (i === computing) el.className = 'snake snake-moving';
+      else if (computing < 0 && i === evalUpTo) el.className = 'snake snake-still';
+      else el.className = 'snake snake-hidden';
+    });
+  }
+
+  function focusCell(idx) {
+    const t = document.querySelectorAll('#notebook textarea')[idx];
+    if (t) t.focus();
+  }
+
+  // Init
+  async function init() {
+    pyodide = await loadPyodide();
+    await pyodide.runPythonAsync(PY);
+    initialSid = await pyodide.runPythonAsync('_initial');
+    cells.push(newCell());
+    document.getElementById('loading').style.display = 'none';
+    render();
+    focusCell(0);
+  }
+
+  document.getElementById('btn-add').addEventListener('click', () => {
+    insertCell(null);
+    render();
+    focusCell(selected);
+  });
+
+  init().catch(e => {
+    document.getElementById('loading').textContent = 'Failed to load: ' + e;
+  });
+  </script>
+</body>
+</html>
