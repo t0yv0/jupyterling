@@ -7,12 +7,14 @@ export interface CellState {
   readonly isError: boolean;
 }
 
+export type WorkerStatus = 'booting' | 'ready';
+
 export interface AppState {
   readonly cells: readonly CellState[];
   readonly selected: number;
-  readonly evalUpTo: number;   // cells[0..evalUpTo] have fresh results
-  readonly computing: number;  // index of cell being computed, or -1
-  readonly ready: boolean;
+  readonly evalUpTo: number;       // cells[0..evalUpTo] have fresh results
+  readonly computing: number;      // index of cell being computed, or -1
+  readonly worker: WorkerStatus;
 }
 
 export function freshCell(): CellState {
@@ -24,12 +26,11 @@ export const INITIAL_STATE: AppState = {
   selected: 0,
   evalUpTo: -1,
   computing: -1,
-  ready: false,
+  worker: 'booting',
 };
 
 // ── Actions ─────────────────────────────────────────────────────────
 
-// User-initiated actions (dispatched from the UI)
 export type UserAction =
   | { type: 'setCode';        index: number; code: string }
   | { type: 'select';         index: number }
@@ -41,13 +42,12 @@ export type UserAction =
   | { type: 'runAndAdvance';  index: number }
   | { type: 'killWorker' };
 
-// Internal actions (dispatched by the Store in response to worker events)
 export type InternalAction =
+  | { type: 'workerBooting' }
   | { type: 'workerReady' }
   | { type: 'evalStarted';  toIndex: number }
   | { type: 'evalDone';     results: readonly EvalResultItem[] }
-  | { type: 'evalFailed';   toIndex: number; message: string }
-  | { type: 'workerKilled' };
+  | { type: 'evalFailed';   toIndex: number; message: string };
 
 export type Action = UserAction | InternalAction;
 
@@ -62,8 +62,11 @@ export interface EvalResultItem {
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
 
+    case 'workerBooting':
+      return { ...state, worker: 'booting', computing: -1 };
+
     case 'workerReady':
-      return { ...state, ready: true };
+      return { ...state, worker: 'ready' };
 
     case 'setCode': {
       const cells = state.cells.map((c, i) =>
@@ -149,10 +152,7 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, cells, computing: -1, evalUpTo: action.toIndex };
     }
 
-    case 'workerKilled':
-      return { ...state, computing: -1 };
-
-    // 'run' and 'killWorker' are side-effect-only — no state change in reducer.
+    // Side-effect-only actions — no state change in reducer.
     case 'run':
     case 'killWorker':
       return state;
@@ -167,6 +167,8 @@ export type Listener = (state: AppState) => void;
 export class Store {
   private state: AppState;
   private listeners = new Set<Listener>();
+
+  // Worker handle + pending RPC slot
   private worker: Worker | null = null;
   private pendingResolve: ((msg: any) => void) | null = null;
   private pendingId: number | null = null;
@@ -185,16 +187,16 @@ export class Store {
     return () => this.listeners.delete(fn);
   }
 
-  private setState(next: AppState): void {
-    if (next === this.state) return;
-    this.state = next;
-    for (const fn of this.listeners) fn(next);
+  private emit(): void {
+    for (const fn of this.listeners) fn(this.state);
   }
 
-  // Apply reducer, then handle side effects for the action.
   dispatch(action: Action): void {
-    const prev = this.state;
-    this.setState(reduce(prev, action));
+    const next = reduce(this.state, action);
+    if (next !== this.state) {
+      this.state = next;
+      this.emit();
+    }
 
     // Side effects
     switch (action.type) {
@@ -205,7 +207,7 @@ export class Store {
         this.requestEval(action.index);
         break;
       case 'killWorker':
-        this.doKillWorker();
+        this.killAndRespawn();
         break;
     }
   }
@@ -226,18 +228,29 @@ export class Store {
       this.dispatch({ type: 'workerReady' });
     } else if (msg.type === 'result' || msg.type === 'error') {
       if (msg.id !== this.pendingId) return;
-      if (this.pendingResolve) this.pendingResolve(msg);
+      const resolve = this.pendingResolve;
       this.pendingResolve = null;
       this.pendingId = null;
+      if (resolve) resolve(msg);
     }
   }
 
-  private doKillWorker(): void {
+  private killAndRespawn(): void {
     if (this.worker) this.worker.terminate();
     this.pendingResolve = null;
     this.pendingId = null;
-    this.dispatch({ type: 'workerKilled' });
+    this.worker = null;
+    this.dispatch({ type: 'workerBooting' });
     this.spawnWorker();
+  }
+
+  private waitForReady(): Promise<void> {
+    if (this.state.worker === 'ready') return Promise.resolve();
+    return new Promise<void>(resolve => {
+      const unsub = this.subscribe(s => {
+        if (s.worker === 'ready') { unsub(); resolve(); }
+      });
+    });
   }
 
   private sendEval(codeCells: string[]): Promise<any> {
@@ -250,7 +263,11 @@ export class Store {
   }
 
   private async requestEval(toIndex: number): Promise<void> {
-    if (this.state.computing >= 0) return;
+    if (this.state.computing >= 0) {
+      this.killAndRespawn();
+    }
+
+    await this.waitForReady();
 
     this.dispatch({ type: 'evalStarted', toIndex });
 

@@ -7,14 +7,16 @@ export const INITIAL_STATE = {
     selected: 0,
     evalUpTo: -1,
     computing: -1,
-    ready: false,
+    worker: 'booting',
 };
 // ── Pure Reducer ────────────────────────────────────────────────────
 // Every state transition is here. No side effects.
 export function reduce(state, action) {
     switch (action.type) {
+        case 'workerBooting':
+            return { ...state, worker: 'booting', computing: -1 };
         case 'workerReady':
-            return { ...state, ready: true };
+            return { ...state, worker: 'ready' };
         case 'setCode': {
             const cells = state.cells.map((c, i) => i === action.index ? { ...c, code: action.code } : c);
             return {
@@ -88,9 +90,7 @@ export function reduce(state, action) {
                 : c);
             return { ...state, cells, computing: -1, evalUpTo: action.toIndex };
         }
-        case 'workerKilled':
-            return { ...state, computing: -1 };
-        // 'run' and 'killWorker' are side-effect-only — no state change in reducer.
+        // Side-effect-only actions — no state change in reducer.
         case 'run':
         case 'killWorker':
             return state;
@@ -99,6 +99,7 @@ export function reduce(state, action) {
 export class Store {
     constructor(initial = INITIAL_STATE) {
         this.listeners = new Set();
+        // Worker handle + pending RPC slot
         this.worker = null;
         this.pendingResolve = null;
         this.pendingId = null;
@@ -112,17 +113,16 @@ export class Store {
         this.listeners.add(fn);
         return () => this.listeners.delete(fn);
     }
-    setState(next) {
-        if (next === this.state)
-            return;
-        this.state = next;
+    emit() {
         for (const fn of this.listeners)
-            fn(next);
+            fn(this.state);
     }
-    // Apply reducer, then handle side effects for the action.
     dispatch(action) {
-        const prev = this.state;
-        this.setState(reduce(prev, action));
+        const next = reduce(this.state, action);
+        if (next !== this.state) {
+            this.state = next;
+            this.emit();
+        }
         // Side effects
         switch (action.type) {
             case 'run':
@@ -132,7 +132,7 @@ export class Store {
                 this.requestEval(action.index);
                 break;
             case 'killWorker':
-                this.doKillWorker();
+                this.killAndRespawn();
                 break;
         }
     }
@@ -151,19 +151,33 @@ export class Store {
         else if (msg.type === 'result' || msg.type === 'error') {
             if (msg.id !== this.pendingId)
                 return;
-            if (this.pendingResolve)
-                this.pendingResolve(msg);
+            const resolve = this.pendingResolve;
             this.pendingResolve = null;
             this.pendingId = null;
+            if (resolve)
+                resolve(msg);
         }
     }
-    doKillWorker() {
+    killAndRespawn() {
         if (this.worker)
             this.worker.terminate();
         this.pendingResolve = null;
         this.pendingId = null;
-        this.dispatch({ type: 'workerKilled' });
+        this.worker = null;
+        this.dispatch({ type: 'workerBooting' });
         this.spawnWorker();
+    }
+    waitForReady() {
+        if (this.state.worker === 'ready')
+            return Promise.resolve();
+        return new Promise(resolve => {
+            const unsub = this.subscribe(s => {
+                if (s.worker === 'ready') {
+                    unsub();
+                    resolve();
+                }
+            });
+        });
     }
     sendEval(codeCells) {
         return new Promise(resolve => {
@@ -174,8 +188,10 @@ export class Store {
         });
     }
     async requestEval(toIndex) {
-        if (this.state.computing >= 0)
-            return;
+        if (this.state.computing >= 0) {
+            this.killAndRespawn();
+        }
+        await this.waitForReady();
         this.dispatch({ type: 'evalStarted', toIndex });
         const prefix = this.state.cells.slice(0, toIndex + 1).map(c => c.code);
         const msg = await this.sendEval(prefix);

@@ -22,10 +22,12 @@ function dispatch(action) {
 
 // ── Components ──────────────────────────────────────────────────────
 
-function Snake({ cellIndex, computing, evalUpTo }) {
+function Snake({ cellIndex, computing, evalUpTo, workerStatus }) {
   let cls = 'snake snake-hidden';
-  if (computing >= 0 && cellIndex === computing) cls = 'snake snake-moving';
-  else if (computing < 0 && cellIndex === evalUpTo) cls = 'snake snake-still';
+  if (workerStatus === 'ready') {
+    if (computing >= 0 && cellIndex === computing) cls = 'snake snake-moving';
+    else if (computing < 0 && cellIndex === evalUpTo) cls = 'snake snake-still';
+  }
   return html`<span class=${cls}>\u{1F40D}</span>`;
 }
 
@@ -38,7 +40,7 @@ function ResultBox({ cell, fresh }) {
   return html`<div class=${cls}>${cell.result.trimEnd()}</div>`;
 }
 
-function CellRow({ cell, index, selected, computing, evalUpTo }) {
+function CellRow({ cell, index, selected, computing, evalUpTo, workerStatus }) {
   const taRef = useRef(null);
   const fresh = index <= evalUpTo;
 
@@ -84,7 +86,7 @@ function CellRow({ cell, index, selected, computing, evalUpTo }) {
   return html`
     <div class="cell">
       <div class="gutter">
-        <${Snake} cellIndex=${index} computing=${computing} evalUpTo=${evalUpTo} />
+        <${Snake} cellIndex=${index} computing=${computing} evalUpTo=${evalUpTo} workerStatus=${workerStatus} />
       </div>
       <div class=${'cell-inner' + (selected ? ' selected' : '')}>
         <textarea
@@ -105,7 +107,9 @@ function CellRow({ cell, index, selected, computing, evalUpTo }) {
 function App() {
   const state = useStore();
 
-  if (!state.ready) return html`<div class="loading-msg">Loading Python \u{1F40D}</div>`;
+  // First boot: show loading screen. Respawn: keep the notebook visible.
+  if (state.worker === 'booting' && state.evalUpTo === -1 && !state.cells.some(c => c.code))
+    return html`<div class="loading-msg">Loading Python \u{1F40D}</div>`;
 
   return html`
     <div id="notebook">
@@ -117,6 +121,7 @@ function App() {
           selected=${i === state.selected}
           computing=${state.computing}
           evalUpTo=${state.evalUpTo}
+          workerStatus=${state.worker}
         />
       `)}
     </div>
