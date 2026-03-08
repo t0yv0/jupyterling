@@ -78,6 +78,8 @@ function CellRow({ cell, index, selected, computing, evalUpTo, target, workerSta
       ev.preventDefault(); dispatch({ type: 'selectDown' });
     } else if (ctrl && ev.key === 'Enter') {
       ev.preventDefault(); dispatch({ type: 'run', index });
+    } else if (ev.altKey && ev.key === 'Enter') {
+      ev.preventDefault(); dispatch({ type: 'runAndInsert', index });
     } else if (ev.altKey && (ev.key === 'Delete' || ev.key === 'Backspace')) {
       ev.preventDefault(); dispatch({ type: 'deleteCell', index });
     } else if (ev.shiftKey && ev.key === 'Enter') {

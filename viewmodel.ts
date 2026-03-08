@@ -42,6 +42,7 @@ export type UserAction =
   | { type: 'addCell' }
   | { type: 'run';            index: number }
   | { type: 'runAndAdvance';  index: number }
+  | { type: 'runAndInsert';   index: number }
   | { type: 'killWorker' };
 
 export type InternalAction =
@@ -120,6 +121,15 @@ export function reduce(state: AppState, action: Action): AppState {
         return { ...state, cells, selected: nextIdx };
       }
       return { ...state, selected: nextIdx };
+    }
+
+    case 'runAndInsert': {
+      const cells = [
+        ...state.cells.slice(0, action.index + 1),
+        freshCell(),
+        ...state.cells.slice(action.index + 1),
+      ];
+      return { ...state, cells, selected: action.index + 1 };
     }
 
     case 'evalStarted':
@@ -212,6 +222,7 @@ export class Store {
         this.runTo(action.index);
         break;
       case 'runAndAdvance':
+      case 'runAndInsert':
         this.runTo(action.index);
         break;
       case 'killWorker':

@@ -62,6 +62,14 @@ export function reduce(state, action) {
             }
             return { ...state, selected: nextIdx };
         }
+        case 'runAndInsert': {
+            const cells = [
+                ...state.cells.slice(0, action.index + 1),
+                freshCell(),
+                ...state.cells.slice(action.index + 1),
+            ];
+            return { ...state, cells, selected: action.index + 1 };
+        }
         case 'evalStarted':
             return { ...state, computing: action.cellIndex, target: action.target };
         case 'evalDone': {
@@ -136,6 +144,7 @@ export class Store {
                 this.runTo(action.index);
                 break;
             case 'runAndAdvance':
+            case 'runAndInsert':
                 this.runTo(action.index);
                 break;
             case 'killWorker':
