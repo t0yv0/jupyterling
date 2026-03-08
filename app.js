@@ -1,63 +1,115 @@
 'use strict';
 
 // State
-let cells = [];      // { code, result, output, error, hasResult }
-let sids = [];       // sids[i] = Python state ID after cell i
+let cells = [];      // { code, result, hasResult, isError }
 let selected = 0;
-let evalUpTo = -1;   // cells 0..evalUpTo are fresh
+let evalUpTo = -1;   // cells 0..evalUpTo have fresh results
 let computing = -1;  // cell index being computed, or -1
-let pyodide, initialSid;
+let evalId = 0;      // monotonic ID to ignore stale responses
 
+// Worker management
+let worker = null;
+let pendingResolve = null;
+let pendingId = null;
+
+function spawnWorker() {
+  worker = new Worker('worker.js');
+  worker.onmessage = onWorkerMessage;
+}
+
+function onWorkerMessage(e) {
+  const msg = e.data;
+  if (msg.type === 'ready') {
+    document.getElementById('loading').style.display = 'none';
+    render();
+    focusCell(0);
+  } else if (msg.type === 'result' || msg.type === 'error') {
+    if (msg.id !== pendingId) return; // stale
+    if (pendingResolve) pendingResolve(msg);
+    pendingResolve = null;
+    pendingId = null;
+  }
+}
+
+function killWorker() {
+  if (worker) worker.terminate();
+  pendingResolve = null;
+  pendingId = null;
+  spawnWorker();
+}
+
+function sendEval(codeCells) {
+  return new Promise(resolve => {
+    const id = ++evalId;
+    pendingId = id;
+    pendingResolve = resolve;
+    worker.postMessage({ type: 'eval', id, cells: codeCells });
+  });
+}
+
+// Cell operations
 function newCell() {
-  return { code: '', result: '', output: '', error: '', hasResult: false };
+  return { code: '', result: '', hasResult: false, isError: false };
 }
 
 function insertCell(afterIdx) {
   if (afterIdx === null) afterIdx = cells.length - 1;
   cells.splice(afterIdx + 1, 0, newCell());
-  sids = sids.slice(0, afterIdx + 1);
   evalUpTo = Math.min(evalUpTo, afterIdx);
   selected = afterIdx + 1;
 }
 
 function deleteCell(idx) {
   if (cells.length === 1) {
-    cells[0] = newCell(); sids = []; evalUpTo = -1; return;
+    cells[0] = newCell(); evalUpTo = -1; return;
   }
   cells.splice(idx, 1);
-  sids = sids.slice(0, idx);
   evalUpTo = Math.min(evalUpTo, idx - 1);
   selected = Math.min(idx, cells.length - 1);
 }
 
 function markStale(fromIdx) {
-  sids = sids.slice(0, fromIdx);
   evalUpTo = Math.min(evalUpTo, fromIdx - 1);
 }
 
-// Runner
+// Runner — sends cells[0..toIdx] prefix to worker
 async function runUpTo(toIdx) {
   if (computing >= 0) return;
-  const from = Math.min(evalUpTo + 1, toIdx);
-  for (let i = from; i <= toIdx; i++) {
-    computing = i;
-    render();
-    const prevSid = (i > 0 && sids[i - 1] != null) ? sids[i - 1] : initialSid;
-    pyodide.globals.set('_s', prevSid);
-    pyodide.globals.set('_c', cells[i].code);
-    let arr;
-    try {
-      const proxy = await pyodide.runPythonAsync('run_cell(_s, _c)');
-      arr = proxy.toJs(); proxy.destroy();
-    } catch (e) {
-      arr = [prevSid, '', '', String(e)];
-    }
-    const [sid, result, output, error] = arr;
-    sids[i] = sid;
-    Object.assign(cells[i], { result, output, error, hasResult: true });
-    evalUpTo = i;
-  }
+  computing = toIdx;
+  render();
+
+  const prefix = cells.slice(0, toIdx + 1).map(c => c.code);
+  const msg = await sendEval(prefix);
+
   computing = -1;
+
+  if (msg.type === 'result') {
+    const results = msg.results;
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.error != null) {
+        cells[i].result = r.error;
+        cells[i].isError = true;
+      } else {
+        cells[i].result = r.text || '';
+        cells[i].isError = false;
+      }
+      cells[i].hasResult = true;
+    }
+    evalUpTo = results.length - 1;
+  } else {
+    // Worker-level error
+    cells[toIdx].result = msg.message;
+    cells[toIdx].isError = true;
+    cells[toIdx].hasResult = true;
+    evalUpTo = toIdx;
+  }
+
+  // Mark cells beyond results as stale (keep old result text but not fresh)
+  for (let i = evalUpTo + 1; i < cells.length; i++) {
+    // hasResult stays true so we show greyed-out old results
+  }
+
   render();
 }
 
@@ -88,6 +140,12 @@ function handleKey(e, i) {
     if (i === cells.length - 1) insertCell(i);
     else selected = i + 1;
     runUpTo(i).then(() => focusCell(selected));
+  } else if (ctrl && e.key === 'Backspace') {
+    // Kill stuck worker
+    e.preventDefault();
+    killWorker();
+    computing = -1;
+    render();
   }
 }
 
@@ -114,7 +172,7 @@ function render() {
     gutter.className = 'gutter';
     const snake = document.createElement('span');
     snake.textContent = '\u{1F40D}';
-    if (i === computing) snake.className = 'snake snake-moving';
+    if (computing >= 0 && i === computing) snake.className = 'snake snake-moving';
     else if (computing < 0 && i === evalUpTo) snake.className = 'snake snake-still';
     else snake.className = 'snake snake-hidden';
     gutter.appendChild(snake);
@@ -145,17 +203,13 @@ function render() {
     inner.appendChild(ta);
 
     // Result
-    if (cell.hasResult) {
-      const text = cell.error
-        ? cell.error.trim()
-        : (cell.output + cell.result).trimEnd();
-      if (text) {
-        const res = document.createElement('div');
-        if (cell.error) res.className = fresh ? 'result result-err' : 'result result-stale';
-        else res.className = fresh ? 'result result-ok' : 'result result-stale';
-        res.textContent = text;
-        inner.appendChild(res);
-      }
+    if (cell.hasResult && cell.result) {
+      const res = document.createElement('div');
+      const stale = !fresh;
+      if (cell.isError) res.className = stale ? 'result result-stale' : 'result result-err';
+      else res.className = stale ? 'result result-stale' : 'result result-ok';
+      res.textContent = cell.result.trimEnd();
+      inner.appendChild(res);
     }
 
     row.appendChild(gutter);
@@ -175,14 +229,14 @@ function refreshStale() {
     if (!res) return;
     const fresh = i <= evalUpTo;
     const cell = cells[i];
-    if (cell.error) res.className = fresh ? 'result result-err' : 'result result-stale';
+    if (cell.isError) res.className = fresh ? 'result result-err' : 'result result-stale';
     else res.className = fresh ? 'result result-ok' : 'result result-stale';
   });
 }
 
 function refreshSnake() {
   document.querySelectorAll('.snake').forEach((el, i) => {
-    if (i === computing) el.className = 'snake snake-moving';
+    if (computing >= 0 && i === computing) el.className = 'snake snake-moving';
     else if (computing < 0 && i === evalUpTo) el.className = 'snake snake-still';
     else el.className = 'snake snake-hidden';
   });
@@ -194,23 +248,5 @@ function focusCell(idx) {
 }
 
 // Init
-async function init() {
-  pyodide = await loadPyodide();
-  const pyCode = await fetch('evaluator.py').then(r => r.text());
-  await pyodide.runPythonAsync(pyCode);
-  initialSid = await pyodide.runPythonAsync('_initial');
-  cells.push(newCell());
-  document.getElementById('loading').style.display = 'none';
-  render();
-  focusCell(0);
-}
-
-document.getElementById('btn-add').addEventListener('click', () => {
-  insertCell(null);
-  render();
-  focusCell(selected);
-});
-
-init().catch(e => {
-  document.getElementById('loading').textContent = 'Failed to load: ' + e;
-});
+cells.push(newCell());
+spawnWorker();
