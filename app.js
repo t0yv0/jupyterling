@@ -2,51 +2,25 @@ import {
   html, render, useState, useRef, useCallback, useEffect
 } from 'https://esm.sh/htm/preact/standalone';
 
-// ── Worker management ──────────────────────────────────────────────
+import { Store, INITIAL_STATE } from './viewmodel.js';
 
-let worker = null;
-let pendingResolve = null;
-let pendingId = null;
-let evalId = 0;
+// ── Store singleton ─────────────────────────────────────────────────
 
-function spawnWorker(onReady) {
-  worker = new Worker('worker.js');
-  worker.onmessage = (e) => {
-    const msg = e.data;
-    if (msg.type === 'ready') {
-      onReady();
-    } else if (msg.type === 'result' || msg.type === 'error') {
-      if (msg.id !== pendingId) return;
-      if (pendingResolve) pendingResolve(msg);
-      pendingResolve = null;
-      pendingId = null;
-    }
-  };
+const store = new Store(INITIAL_STATE);
+
+// ── Hook: subscribe to store ────────────────────────────────────────
+
+function useStore() {
+  const [state, setState] = useState(store.getState());
+  useEffect(() => store.subscribe(setState), []);
+  return state;
 }
 
-function killWorker(onReady) {
-  if (worker) worker.terminate();
-  pendingResolve = null;
-  pendingId = null;
-  spawnWorker(onReady);
+function dispatch(action) {
+  store.dispatch(action);
 }
 
-function sendEval(codeCells) {
-  return new Promise(resolve => {
-    const id = ++evalId;
-    pendingId = id;
-    pendingResolve = resolve;
-    worker.postMessage({ type: 'eval', id, cells: codeCells });
-  });
-}
-
-// ── State helpers ──────────────────────────────────────────────────
-
-function newCell() {
-  return { code: '', result: '', hasResult: false, isError: false };
-}
-
-// ── Components ─────────────────────────────────────────────────────
+// ── Components ──────────────────────────────────────────────────────
 
 function Snake({ cellIndex, computing, evalUpTo }) {
   let cls = 'snake snake-hidden';
@@ -64,7 +38,7 @@ function ResultBox({ cell, fresh }) {
   return html`<div class=${cls}>${cell.result.trimEnd()}</div>`;
 }
 
-function CellRow({ cell, index, selected, computing, evalUpTo, dispatch }) {
+function CellRow({ cell, index, selected, computing, evalUpTo }) {
   const taRef = useRef(null);
   const fresh = index <= evalUpTo;
 
@@ -129,119 +103,7 @@ function CellRow({ cell, index, selected, computing, evalUpTo, dispatch }) {
 }
 
 function App() {
-  const [state, setState] = useState({
-    cells: [newCell()],
-    selected: 0,
-    evalUpTo: -1,
-    computing: -1,
-    ready: false,
-  });
-
-  const stateRef = useRef(state);
-  stateRef.current = state;
-
-  const update = useCallback(fn => {
-    setState(prev => {
-      const next = fn(prev);
-      return next === prev ? prev : { ...prev, ...next };
-    });
-  }, []);
-
-  // Boot worker once
-  useEffect(() => {
-    spawnWorker(() => update(() => ({ ready: true })));
-  }, []);
-
-  // Run logic (needs access to current state via ref)
-  const runUpTo = useCallback(async (toIdx) => {
-    const s = stateRef.current;
-    if (s.computing >= 0) return;
-
-    update(() => ({ computing: toIdx }));
-
-    const prefix = s.cells.slice(0, toIdx + 1).map(c => c.code);
-    const msg = await sendEval(prefix);
-    const cur = stateRef.current;
-    const cells = cur.cells.map(c => ({ ...c }));
-
-    if (msg.type === 'result') {
-      for (let i = 0; i < msg.results.length; i++) {
-        const r = msg.results[i];
-        cells[i].result = r.error != null ? r.error : (r.text || '');
-        cells[i].isError = r.error != null;
-        cells[i].hasResult = true;
-      }
-      update(() => ({ cells, computing: -1, evalUpTo: msg.results.length - 1 }));
-    } else {
-      cells[toIdx].result = msg.message;
-      cells[toIdx].isError = true;
-      cells[toIdx].hasResult = true;
-      update(() => ({ cells, computing: -1, evalUpTo: toIdx }));
-    }
-  }, []);
-
-  const dispatch = useCallback((action) => {
-    const s = stateRef.current;
-    switch (action.type) {
-      case 'setCode': {
-        const cells = s.cells.map((c, i) =>
-          i === action.index ? { ...c, code: action.code } : c);
-        update(() => ({
-          cells,
-          evalUpTo: Math.min(s.evalUpTo, action.index - 1),
-        }));
-        break;
-      }
-      case 'select':
-        if (s.selected !== action.index) update(() => ({ selected: action.index }));
-        break;
-      case 'selectUp':
-        if (s.selected > 0) update(() => ({ selected: s.selected - 1 }));
-        break;
-      case 'selectDown':
-        if (s.selected < s.cells.length - 1) update(() => ({ selected: s.selected + 1 }));
-        break;
-      case 'run':
-        runUpTo(action.index);
-        break;
-      case 'runAndAdvance': {
-        const nextIdx = action.index + 1;
-        const cells = [...s.cells];
-        let sel;
-        if (nextIdx >= cells.length) {
-          cells.push(newCell());
-          sel = nextIdx;
-        } else {
-          sel = nextIdx;
-        }
-        update(() => ({ cells, selected: sel }));
-        runUpTo(action.index);
-        break;
-      }
-      case 'deleteCell': {
-        if (s.cells.length === 1) {
-          update(() => ({ cells: [newCell()], evalUpTo: -1, selected: 0 }));
-        } else {
-          const cells = s.cells.filter((_, i) => i !== action.index);
-          update(() => ({
-            cells,
-            evalUpTo: Math.min(s.evalUpTo, action.index - 1),
-            selected: Math.min(action.index, cells.length - 1),
-          }));
-        }
-        break;
-      }
-      case 'addCell': {
-        const cells = [...s.cells, newCell()];
-        update(() => ({ cells, selected: cells.length - 1 }));
-        break;
-      }
-      case 'killWorker':
-        killWorker(() => update(() => ({ ready: true })));
-        update(() => ({ computing: -1 }));
-        break;
-    }
-  }, [runUpTo]);
+  const state = useStore();
 
   if (!state.ready) return html`<div class="loading-msg">Loading Python \u{1F40D}</div>`;
 
@@ -255,7 +117,6 @@ function App() {
           selected=${i === state.selected}
           computing=${state.computing}
           evalUpTo=${state.evalUpTo}
-          dispatch=${dispatch}
         />
       `)}
     </div>
@@ -265,4 +126,7 @@ function App() {
   `;
 }
 
+// ── Boot ────────────────────────────────────────────────────────────
+
+store.boot();
 render(html`<${App} />`, document.getElementById('app'));
