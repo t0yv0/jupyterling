@@ -1,41 +1,34 @@
-'use strict';
+import {
+  html, render, useState, useRef, useCallback, useEffect
+} from 'https://esm.sh/htm/preact/standalone';
 
-// State
-let cells = [];      // { code, result, hasResult, isError }
-let selected = 0;
-let evalUpTo = -1;   // cells 0..evalUpTo have fresh results
-let computing = -1;  // cell index being computed, or -1
-let evalId = 0;      // monotonic ID to ignore stale responses
+// ── Worker management ──────────────────────────────────────────────
 
-// Worker management
 let worker = null;
 let pendingResolve = null;
 let pendingId = null;
+let evalId = 0;
 
-function spawnWorker() {
+function spawnWorker(onReady) {
   worker = new Worker('worker.js');
-  worker.onmessage = onWorkerMessage;
+  worker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.type === 'ready') {
+      onReady();
+    } else if (msg.type === 'result' || msg.type === 'error') {
+      if (msg.id !== pendingId) return;
+      if (pendingResolve) pendingResolve(msg);
+      pendingResolve = null;
+      pendingId = null;
+    }
+  };
 }
 
-function onWorkerMessage(e) {
-  const msg = e.data;
-  if (msg.type === 'ready') {
-    document.getElementById('loading').style.display = 'none';
-    render();
-    focusCell(0);
-  } else if (msg.type === 'result' || msg.type === 'error') {
-    if (msg.id !== pendingId) return; // stale
-    if (pendingResolve) pendingResolve(msg);
-    pendingResolve = null;
-    pendingId = null;
-  }
-}
-
-function killWorker() {
+function killWorker(onReady) {
   if (worker) worker.terminate();
   pendingResolve = null;
   pendingId = null;
-  spawnWorker();
+  spawnWorker(onReady);
 }
 
 function sendEval(codeCells) {
@@ -47,206 +40,229 @@ function sendEval(codeCells) {
   });
 }
 
-// Cell operations
+// ── State helpers ──────────────────────────────────────────────────
+
 function newCell() {
   return { code: '', result: '', hasResult: false, isError: false };
 }
 
-function insertCell(afterIdx) {
-  if (afterIdx === null) afterIdx = cells.length - 1;
-  cells.splice(afterIdx + 1, 0, newCell());
-  evalUpTo = Math.min(evalUpTo, afterIdx);
-  selected = afterIdx + 1;
+// ── Components ─────────────────────────────────────────────────────
+
+function Snake({ cellIndex, computing, evalUpTo }) {
+  let cls = 'snake snake-hidden';
+  if (computing >= 0 && cellIndex === computing) cls = 'snake snake-moving';
+  else if (computing < 0 && cellIndex === evalUpTo) cls = 'snake snake-still';
+  return html`<span class=${cls}>\u{1F40D}</span>`;
 }
 
-function deleteCell(idx) {
-  if (cells.length === 1) {
-    cells[0] = newCell(); evalUpTo = -1; return;
-  }
-  cells.splice(idx, 1);
-  evalUpTo = Math.min(evalUpTo, idx - 1);
-  selected = Math.min(idx, cells.length - 1);
+function ResultBox({ cell, fresh }) {
+  if (!cell.hasResult || !cell.result) return null;
+  let cls = 'result ';
+  if (!fresh) cls += 'result-stale';
+  else if (cell.isError) cls += 'result-err';
+  else cls += 'result-ok';
+  return html`<div class=${cls}>${cell.result.trimEnd()}</div>`;
 }
 
-function markStale(fromIdx) {
-  evalUpTo = Math.min(evalUpTo, fromIdx - 1);
+function CellRow({ cell, index, selected, computing, evalUpTo, dispatch }) {
+  const taRef = useRef(null);
+  const fresh = index <= evalUpTo;
+
+  useEffect(() => {
+    if (selected && taRef.current && document.activeElement !== taRef.current) {
+      taRef.current.focus();
+    }
+  }, [selected]);
+
+  const rows = Math.max(1, (cell.code.match(/\n/g) || []).length + 1);
+
+  const onInput = useCallback(ev => {
+    dispatch({ type: 'setCode', index, code: ev.target.value });
+  }, [index]);
+
+  const onFocus = useCallback(() => {
+    dispatch({ type: 'select', index });
+  }, [index]);
+
+  const onKeyDown = useCallback(ev => {
+    const ctrl = ev.ctrlKey || ev.metaKey;
+    if (ev.key === 'Tab') {
+      ev.preventDefault();
+      const t = ev.target, s = t.selectionStart, en = t.selectionEnd;
+      t.value = t.value.slice(0, s) + '    ' + t.value.slice(en);
+      t.selectionStart = t.selectionEnd = s + 4;
+      dispatch({ type: 'setCode', index, code: t.value });
+    } else if (ctrl && ev.key === 'ArrowUp') {
+      ev.preventDefault(); dispatch({ type: 'selectUp' });
+    } else if (ctrl && ev.key === 'ArrowDown') {
+      ev.preventDefault(); dispatch({ type: 'selectDown' });
+    } else if (ctrl && ev.key === 'Enter') {
+      ev.preventDefault(); dispatch({ type: 'run', index });
+    } else if (ctrl && ev.key === 'Delete') {
+      ev.preventDefault(); dispatch({ type: 'deleteCell', index });
+    } else if (ev.shiftKey && ev.key === 'Enter') {
+      ev.preventDefault(); dispatch({ type: 'runAndAdvance', index });
+    } else if (ctrl && ev.key === 'Backspace') {
+      ev.preventDefault(); dispatch({ type: 'killWorker' });
+    }
+  }, [index]);
+
+  return html`
+    <div class="cell">
+      <div class="gutter">
+        <${Snake} cellIndex=${index} computing=${computing} evalUpTo=${evalUpTo} />
+      </div>
+      <div class=${'cell-inner' + (selected ? ' selected' : '')}>
+        <textarea
+          ref=${taRef}
+          rows=${rows}
+          spellcheck=${false}
+          value=${cell.code}
+          onInput=${onInput}
+          onFocus=${onFocus}
+          onKeyDown=${onKeyDown}
+        />
+        <${ResultBox} cell=${cell} fresh=${fresh} />
+      </div>
+    </div>
+  `;
 }
 
-// Runner — sends cells[0..toIdx] prefix to worker
-async function runUpTo(toIdx) {
-  if (computing >= 0) return;
-  computing = toIdx;
-  render();
+function App() {
+  const [state, setState] = useState({
+    cells: [newCell()],
+    selected: 0,
+    evalUpTo: -1,
+    computing: -1,
+    ready: false,
+  });
 
-  const prefix = cells.slice(0, toIdx + 1).map(c => c.code);
-  const msg = await sendEval(prefix);
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
-  computing = -1;
+  const update = useCallback(fn => {
+    setState(prev => {
+      const next = fn(prev);
+      return next === prev ? prev : { ...prev, ...next };
+    });
+  }, []);
 
-  if (msg.type === 'result') {
-    const results = msg.results;
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      if (r.error != null) {
-        cells[i].result = r.error;
-        cells[i].isError = true;
-      } else {
-        cells[i].result = r.text || '';
-        cells[i].isError = false;
+  // Boot worker once
+  useEffect(() => {
+    spawnWorker(() => update(() => ({ ready: true })));
+  }, []);
+
+  // Run logic (needs access to current state via ref)
+  const runUpTo = useCallback(async (toIdx) => {
+    const s = stateRef.current;
+    if (s.computing >= 0) return;
+
+    update(() => ({ computing: toIdx }));
+
+    const prefix = s.cells.slice(0, toIdx + 1).map(c => c.code);
+    const msg = await sendEval(prefix);
+    const cur = stateRef.current;
+    const cells = cur.cells.map(c => ({ ...c }));
+
+    if (msg.type === 'result') {
+      for (let i = 0; i < msg.results.length; i++) {
+        const r = msg.results[i];
+        cells[i].result = r.error != null ? r.error : (r.text || '');
+        cells[i].isError = r.error != null;
+        cells[i].hasResult = true;
       }
-      cells[i].hasResult = true;
+      update(() => ({ cells, computing: -1, evalUpTo: msg.results.length - 1 }));
+    } else {
+      cells[toIdx].result = msg.message;
+      cells[toIdx].isError = true;
+      cells[toIdx].hasResult = true;
+      update(() => ({ cells, computing: -1, evalUpTo: toIdx }));
     }
-    evalUpTo = results.length - 1;
-  } else {
-    // Worker-level error
-    cells[toIdx].result = msg.message;
-    cells[toIdx].isError = true;
-    cells[toIdx].hasResult = true;
-    evalUpTo = toIdx;
-  }
+  }, []);
 
-  // Mark cells beyond results as stale (keep old result text but not fresh)
-  for (let i = evalUpTo + 1; i < cells.length; i++) {
-    // hasResult stays true so we show greyed-out old results
-  }
-
-  render();
-}
-
-// Keyboard
-function handleKey(e, i) {
-  const ctrl = e.ctrlKey || e.metaKey;
-  if (e.key === 'Tab') {
-    e.preventDefault();
-    const t = e.target, s = t.selectionStart, en = t.selectionEnd;
-    t.value = t.value.slice(0, s) + '    ' + t.value.slice(en);
-    t.selectionStart = t.selectionEnd = s + 4;
-    cells[i].code = t.value;
-  } else if (ctrl && e.key === 'ArrowUp') {
-    e.preventDefault();
-    if (i > 0) { selected = i - 1; render(); focusCell(selected); }
-  } else if (ctrl && e.key === 'ArrowDown') {
-    e.preventDefault();
-    if (i < cells.length - 1) { selected = i + 1; render(); focusCell(selected); }
-  } else if (ctrl && e.key === 'Enter') {
-    e.preventDefault();
-    runUpTo(i);
-  } else if (ctrl && e.key === 'Delete') {
-    e.preventDefault();
-    deleteCell(i);
-    render(); focusCell(selected);
-  } else if (e.shiftKey && e.key === 'Enter') {
-    e.preventDefault();
-    if (i === cells.length - 1) insertCell(i);
-    else selected = i + 1;
-    runUpTo(i).then(() => focusCell(selected));
-  } else if (ctrl && e.key === 'Backspace') {
-    // Kill stuck worker
-    e.preventDefault();
-    killWorker();
-    computing = -1;
-    render();
-  }
-}
-
-// Render
-function render() {
-  const ae = document.activeElement;
-  let fi = -1, ss = 0, se = 0;
-  if (ae && ae.tagName === 'TEXTAREA') {
-    fi = +ae.dataset.i; ss = ae.selectionStart; se = ae.selectionEnd;
-  }
-
-  const nb = document.getElementById('notebook');
-  nb.className = computing >= 0 ? 'busy' : '';
-  nb.innerHTML = '';
-
-  cells.forEach((cell, i) => {
-    const fresh = i <= evalUpTo;
-
-    const row = document.createElement('div');
-    row.className = 'cell';
-
-    // Gutter
-    const gutter = document.createElement('div');
-    gutter.className = 'gutter';
-    const snake = document.createElement('span');
-    snake.textContent = '\u{1F40D}';
-    if (computing >= 0 && i === computing) snake.className = 'snake snake-moving';
-    else if (computing < 0 && i === evalUpTo) snake.className = 'snake snake-still';
-    else snake.className = 'snake snake-hidden';
-    gutter.appendChild(snake);
-
-    // Inner
-    const inner = document.createElement('div');
-    inner.className = 'cell-inner' + (i === selected ? ' selected' : '');
-
-    const ta = document.createElement('textarea');
-    ta.value = cell.code;
-    ta.dataset.i = i;
-    ta.rows = Math.max(1, (cell.code.match(/\n/g) || []).length + 1);
-    ta.spellcheck = false;
-    ta.addEventListener('input', ev => {
-      cells[i].code = ev.target.value;
-      ev.target.rows = Math.max(1, (ev.target.value.match(/\n/g) || []).length + 1);
-      markStale(i);
-      refreshStale();
-      refreshSnake();
-    });
-    ta.addEventListener('focus', () => {
-      if (selected === i) return;
-      selected = i;
-      document.querySelectorAll('.cell-inner').forEach((el, j) =>
-        el.classList.toggle('selected', j === i));
-    });
-    ta.addEventListener('keydown', ev => handleKey(ev, i));
-    inner.appendChild(ta);
-
-    // Result
-    if (cell.hasResult && cell.result) {
-      const res = document.createElement('div');
-      const stale = !fresh;
-      if (cell.isError) res.className = stale ? 'result result-stale' : 'result result-err';
-      else res.className = stale ? 'result result-stale' : 'result result-ok';
-      res.textContent = cell.result.trimEnd();
-      inner.appendChild(res);
+  const dispatch = useCallback((action) => {
+    const s = stateRef.current;
+    switch (action.type) {
+      case 'setCode': {
+        const cells = s.cells.map((c, i) =>
+          i === action.index ? { ...c, code: action.code } : c);
+        update(() => ({
+          cells,
+          evalUpTo: Math.min(s.evalUpTo, action.index - 1),
+        }));
+        break;
+      }
+      case 'select':
+        if (s.selected !== action.index) update(() => ({ selected: action.index }));
+        break;
+      case 'selectUp':
+        if (s.selected > 0) update(() => ({ selected: s.selected - 1 }));
+        break;
+      case 'selectDown':
+        if (s.selected < s.cells.length - 1) update(() => ({ selected: s.selected + 1 }));
+        break;
+      case 'run':
+        runUpTo(action.index);
+        break;
+      case 'runAndAdvance': {
+        const nextIdx = action.index + 1;
+        const cells = [...s.cells];
+        let sel;
+        if (nextIdx >= cells.length) {
+          cells.push(newCell());
+          sel = nextIdx;
+        } else {
+          sel = nextIdx;
+        }
+        update(() => ({ cells, selected: sel }));
+        runUpTo(action.index);
+        break;
+      }
+      case 'deleteCell': {
+        if (s.cells.length === 1) {
+          update(() => ({ cells: [newCell()], evalUpTo: -1, selected: 0 }));
+        } else {
+          const cells = s.cells.filter((_, i) => i !== action.index);
+          update(() => ({
+            cells,
+            evalUpTo: Math.min(s.evalUpTo, action.index - 1),
+            selected: Math.min(action.index, cells.length - 1),
+          }));
+        }
+        break;
+      }
+      case 'addCell': {
+        const cells = [...s.cells, newCell()];
+        update(() => ({ cells, selected: cells.length - 1 }));
+        break;
+      }
+      case 'killWorker':
+        killWorker(() => update(() => ({ ready: true })));
+        update(() => ({ computing: -1 }));
+        break;
     }
+  }, [runUpTo]);
 
-    row.appendChild(gutter);
-    row.appendChild(inner);
-    nb.appendChild(row);
-  });
+  if (!state.ready) return html`<div class="loading-msg">Loading Python \u{1F40D}</div>`;
 
-  if (fi >= 0 && fi < cells.length) {
-    const t = nb.querySelectorAll('textarea')[fi];
-    if (t) { t.focus(); try { t.setSelectionRange(ss, se); } catch (_) {} }
-  }
+  return html`
+    <div id="notebook" class=${state.computing >= 0 ? 'busy' : ''}>
+      ${state.cells.map((cell, i) => html`
+        <${CellRow}
+          key=${i}
+          cell=${cell}
+          index=${i}
+          selected=${i === state.selected}
+          computing=${state.computing}
+          evalUpTo=${state.evalUpTo}
+          dispatch=${dispatch}
+        />
+      `)}
+    </div>
+    <div id="toolbar">
+      <button onClick=${() => dispatch({ type: 'addCell' })}>+ Add Cell</button>
+    </div>
+  `;
 }
 
-function refreshStale() {
-  document.querySelectorAll('.cell').forEach((row, i) => {
-    const res = row.querySelector('.result');
-    if (!res) return;
-    const fresh = i <= evalUpTo;
-    const cell = cells[i];
-    if (cell.isError) res.className = fresh ? 'result result-err' : 'result result-stale';
-    else res.className = fresh ? 'result result-ok' : 'result result-stale';
-  });
-}
-
-function refreshSnake() {
-  document.querySelectorAll('.snake').forEach((el, i) => {
-    if (computing >= 0 && i === computing) el.className = 'snake snake-moving';
-    else if (computing < 0 && i === evalUpTo) el.className = 'snake snake-still';
-    else el.className = 'snake snake-hidden';
-  });
-}
-
-function focusCell(idx) {
-  const t = document.querySelectorAll('#notebook textarea')[idx];
-  if (t) t.focus();
-}
-
-// Init
-cells.push(newCell());
-spawnWorker();
+render(html`<${App} />`, document.getElementById('app'));
