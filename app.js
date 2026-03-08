@@ -110,8 +110,42 @@ function CellRow({ cell, index, selected, computing, evalUpTo, target, workerSta
   `;
 }
 
+const SHORTCUTS = [
+  ['Shift+Enter',       'Run cell, advance to next'],
+  ['Alt+Enter',         'Run cell, insert below'],
+  ['Ctrl+Enter',        'Run cell in place'],
+  ['Alt+↑ / Alt+↓',    'Move selection up / down'],
+  ['Alt+Backspace',     'Delete cell'],
+  ['Ctrl+Backspace',    'Restart kernel'],
+  ['Tab',               'Indent (4 spaces)'],
+];
+
+function ShortcutsModal({ onClose }) {
+  return html`
+    <div class="modal-overlay" onClick=${onClose}>
+      <div class="modal" onClick=${e => e.stopPropagation()}>
+        <div class="modal-header">
+          <span>Keyboard Shortcuts</span>
+          <button class="modal-close" onClick=${onClose}>✕</button>
+        </div>
+        <table class="shortcuts-table">
+          <tbody>
+            ${SHORTCUTS.map(([key, desc]) => html`
+              <tr>
+                <td><kbd>${key}</kbd></td>
+                <td>${desc}</td>
+              </tr>
+            `)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
 function App() {
   const state = useStore();
+  const [showShortcuts, setShowShortcuts] = useState(false);
 
   // First boot: show loading screen. Respawn: keep the notebook visible.
   if (state.worker === 'booting' && state.evalUpTo === -1 && !state.cells.some(c => c.code))
@@ -133,8 +167,12 @@ function App() {
       `)}
     </div>
     <div id="toolbar">
-      <button onClick=${() => dispatch({ type: 'addCell' })}>+ Add Cell</button>
+      <button onClick=${() => dispatch({ type: 'addCell' })}>+ Cell</button>
+      <button onClick=${() => dispatch({ type: 'run', index: state.cells.length - 1 })}>▶ Run All</button>
+      <button onClick=${() => dispatch({ type: 'killWorker' })}>↺ Restart</button>
+      <button onClick=${() => setShowShortcuts(true)}>⌨ Shortcuts</button>
     </div>
+    ${showShortcuts && html`<${ShortcutsModal} onClose=${() => setShowShortcuts(false)} />`}
   `;
 }
 

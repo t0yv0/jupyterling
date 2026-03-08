@@ -32,13 +32,37 @@ textarea:focus { outline: none; border-color: #58a6ff44; }
 .result-ok    { border-left-color: #3fb950; color: #c9d1d9; }
 .result-err   { border-left-color: #f85149; color: #ffa198; }
 .result-stale { border-left-color: #30363d; color: #484f58; }
-#toolbar { max-width: 900px; margin: 8px auto; padding: 0 20px 20px; }
+#toolbar { max-width: 900px; margin: 8px auto; padding: 0 20px 20px; display: flex; gap: 6px; }
 button {
   padding: 5px 14px; background: #21262d; color: #c9d1d9;
   border: 1px solid #30363d; border-radius: 4px;
   cursor: pointer; font: 12px monospace;
 }
 button:hover { background: #30363d; }
+.modal-overlay {
+  position: fixed; inset: 0; background: #00000099;
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+.modal {
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  padding: 20px; min-width: 360px;
+}
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 14px; font-weight: bold; color: #58a6ff;
+}
+.modal-close {
+  background: none; border: none; color: #c9d1d9; font-size: 14px;
+  cursor: pointer; padding: 2px 6px;
+}
+.modal-close:hover { color: #fff; background: none; }
+.shortcuts-table { width: 100%; border-collapse: collapse; }
+.shortcuts-table td { padding: 5px 8px; font-size: 12px; }
+.shortcuts-table tr:not(:last-child) td { border-bottom: 1px solid #21262d; }
+kbd {
+  background: #21262d; border: 1px solid #444c56; border-radius: 4px;
+  padding: 2px 6px; font: 11px monospace; white-space: nowrap; color: #e6edf3;
+}
 .loading-msg {
   max-width: 900px; margin: 40px auto; padding: 0 20px;
   font-size: 1.3em; color: #c9d1d9;
