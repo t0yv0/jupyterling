@@ -2,7 +2,7 @@ import {
   html, render, useState, useRef, useEffect
 } from 'https://esm.sh/htm/preact/standalone';
 
-import { Store, INITIAL_STATE } from './viewmodel.js';
+import { Store, INITIAL_STATE, freshCell } from './viewmodel.js';
 
 import { EditorView, keymap, drawSelection } from 'https://esm.sh/@codemirror/view@6';
 import { Prec } from 'https://esm.sh/@codemirror/state@6';
@@ -14,7 +14,28 @@ import { oneDarkHighlightStyle } from 'https://esm.sh/@codemirror/theme-one-dark
 
 // ── Store singleton ─────────────────────────────────────────────────
 
-const store = new Store(INITIAL_STATE);
+const STORAGE_KEY = 'jupyterling-cells';
+
+function loadCells() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const cells = JSON.parse(saved);
+      if (Array.isArray(cells) && cells.length > 0)
+        return cells.map(c => ({ ...freshCell(), code: c.code || '' }));
+    }
+  } catch {}
+  return null;
+}
+
+function saveCells(cells) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cells.map(c => ({ code: c.code }))));
+  } catch {}
+}
+
+const savedCells = loadCells();
+const store = new Store(savedCells ? { ...INITIAL_STATE, cells: savedCells } : INITIAL_STATE);
 
 // ── Hook: subscribe to store ────────────────────────────────────────
 
@@ -217,4 +238,8 @@ function App() {
 // ── Boot ────────────────────────────────────────────────────────────
 
 store.boot();
+store.subscribe(state => saveCells(state.cells));
+if (savedCells) {
+  store.waitForReady().then(() => store.dispatch({ type: 'run', index: savedCells.length - 1 }));
+}
 render(html`<${App} />`, document.getElementById('app'));
