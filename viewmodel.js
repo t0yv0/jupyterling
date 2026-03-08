@@ -7,6 +7,7 @@ export const INITIAL_STATE = {
     selected: 0,
     evalUpTo: -1,
     computing: -1,
+    target: -1,
     worker: 'booting',
 };
 // ── Pure Reducer ────────────────────────────────────────────────────
@@ -14,7 +15,7 @@ export const INITIAL_STATE = {
 export function reduce(state, action) {
     switch (action.type) {
         case 'workerBooting':
-            return { ...state, worker: 'booting', computing: -1 };
+            return { ...state, worker: 'booting', computing: -1, target: -1 };
         case 'workerReady':
             return { ...state, worker: 'ready' };
         case 'setCode': {
@@ -54,8 +55,6 @@ export function reduce(state, action) {
             };
         }
         case 'runAndAdvance': {
-            // State part only: add cell if needed, advance selection.
-            // The eval side effect is handled by the Store.
             const nextIdx = action.index + 1;
             if (nextIdx >= state.cells.length) {
                 const cells = [...state.cells, freshCell()];
@@ -64,7 +63,7 @@ export function reduce(state, action) {
             return { ...state, selected: nextIdx };
         }
         case 'evalStarted':
-            return { ...state, computing: action.toIndex };
+            return { ...state, computing: action.cellIndex, target: action.target };
         case 'evalDone': {
             const cells = state.cells.map((c, i) => {
                 if (i >= action.results.length)
@@ -77,18 +76,26 @@ export function reduce(state, action) {
                     hasResult: true,
                 };
             });
+            const evalUpTo = action.results.length - 1;
+            // If we've reached the target (or error stopped us short), clear both.
+            // Otherwise the Store will continue creeping.
+            const reachedTarget = evalUpTo >= state.target;
+            const hasError = action.results.length > 0 &&
+                action.results[action.results.length - 1].error != null;
+            const done = reachedTarget || hasError;
             return {
                 ...state,
                 cells,
-                computing: -1,
-                evalUpTo: action.results.length - 1,
+                computing: done ? -1 : state.computing,
+                target: done ? -1 : state.target,
+                evalUpTo,
             };
         }
         case 'evalFailed': {
-            const cells = state.cells.map((c, i) => i === action.toIndex
+            const cells = state.cells.map((c, i) => i === action.cellIndex
                 ? { ...c, result: action.message, isError: true, hasResult: true }
                 : c);
-            return { ...state, cells, computing: -1, evalUpTo: action.toIndex };
+            return { ...state, cells, computing: -1, target: -1, evalUpTo: action.cellIndex };
         }
         // Side-effect-only actions — no state change in reducer.
         case 'run':
@@ -126,10 +133,10 @@ export class Store {
         // Side effects
         switch (action.type) {
             case 'run':
-                this.requestEval(action.index);
+                this.runTo(action.index);
                 break;
             case 'runAndAdvance':
-                this.requestEval(action.index);
+                this.runTo(action.index);
                 break;
             case 'killWorker':
                 this.killAndRespawn();
@@ -187,19 +194,28 @@ export class Store {
             this.worker.postMessage({ type: 'eval', id, cells: codeCells });
         });
     }
-    async requestEval(toIndex) {
+    // Creep from evalUpTo+1 toward targetIndex, one cell at a time.
+    async runTo(targetIndex) {
         if (this.state.computing >= 0) {
             this.killAndRespawn();
         }
         await this.waitForReady();
-        this.dispatch({ type: 'evalStarted', toIndex });
-        const prefix = this.state.cells.slice(0, toIndex + 1).map(c => c.code);
-        const msg = await this.sendEval(prefix);
-        if (msg.type === 'result') {
-            this.dispatch({ type: 'evalDone', results: msg.results });
-        }
-        else {
-            this.dispatch({ type: 'evalFailed', toIndex, message: msg.message });
+        let step = this.state.evalUpTo + 1;
+        while (step <= targetIndex) {
+            this.dispatch({ type: 'evalStarted', cellIndex: step, target: targetIndex });
+            const prefix = this.state.cells.slice(0, step + 1).map(c => c.code);
+            const msg = await this.sendEval(prefix);
+            if (msg.type === 'result') {
+                this.dispatch({ type: 'evalDone', results: msg.results });
+            }
+            else {
+                this.dispatch({ type: 'evalFailed', cellIndex: step, message: msg.message });
+                return;
+            }
+            // Stop if evalDone detected an error in results
+            if (this.state.target < 0)
+                return;
+            step = this.state.evalUpTo + 1;
         }
     }
 }

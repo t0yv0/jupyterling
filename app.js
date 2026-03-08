@@ -22,13 +22,17 @@ function dispatch(action) {
 
 // ── Components ──────────────────────────────────────────────────────
 
-function Snake({ cellIndex, computing, evalUpTo, workerStatus }) {
-  let cls = 'snake snake-hidden';
+function Snake({ cellIndex, computing, evalUpTo, target, workerStatus }) {
+  let snakeCls = 'snake snake-hidden';
   if (workerStatus === 'ready') {
-    if (computing >= 0 && cellIndex === computing) cls = 'snake snake-moving';
-    else if (computing < 0 && cellIndex === evalUpTo) cls = 'snake snake-still';
+    if (computing >= 0 && cellIndex === computing) snakeCls = 'snake snake-moving';
+    else if (computing < 0 && cellIndex === evalUpTo) snakeCls = 'snake snake-still';
   }
-  return html`<span class=${cls}>\u{1F40D}</span>`;
+  const showTarget = target >= 0 && cellIndex === target && cellIndex !== computing;
+  return html`
+    <span class=${snakeCls}>\u{1F40D}</span>
+    ${showTarget && html`<span class="target">\u{1F3AF}</span>`}
+  `;
 }
 
 function ResultBox({ cell, fresh }) {
@@ -40,7 +44,7 @@ function ResultBox({ cell, fresh }) {
   return html`<div class=${cls}>${cell.result.trimEnd()}</div>`;
 }
 
-function CellRow({ cell, index, selected, computing, evalUpTo, workerStatus }) {
+function CellRow({ cell, index, selected, computing, evalUpTo, target, workerStatus }) {
   const taRef = useRef(null);
   const fresh = index <= evalUpTo;
 
@@ -86,7 +90,7 @@ function CellRow({ cell, index, selected, computing, evalUpTo, workerStatus }) {
   return html`
     <div class="cell">
       <div class="gutter">
-        <${Snake} cellIndex=${index} computing=${computing} evalUpTo=${evalUpTo} workerStatus=${workerStatus} />
+        <${Snake} cellIndex=${index} computing=${computing} evalUpTo=${evalUpTo} target=${target} workerStatus=${workerStatus} />
       </div>
       <div class=${'cell-inner' + (selected ? ' selected' : '')}>
         <textarea
@@ -121,6 +125,7 @@ function App() {
           selected=${i === state.selected}
           computing=${state.computing}
           evalUpTo=${state.evalUpTo}
+          target=${state.target}
           workerStatus=${state.worker}
         />
       `)}

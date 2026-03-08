@@ -13,7 +13,8 @@ export interface AppState {
   readonly cells: readonly CellState[];
   readonly selected: number;
   readonly evalUpTo: number;       // cells[0..evalUpTo] have fresh results
-  readonly computing: number;      // index of cell being computed, or -1
+  readonly computing: number;      // cell the worker is currently evaluating, or -1
+  readonly target: number;         // cell we're creeping toward, or -1
   readonly worker: WorkerStatus;
 }
 
@@ -26,6 +27,7 @@ export const INITIAL_STATE: AppState = {
   selected: 0,
   evalUpTo: -1,
   computing: -1,
+  target: -1,
   worker: 'booting',
 };
 
@@ -45,9 +47,9 @@ export type UserAction =
 export type InternalAction =
   | { type: 'workerBooting' }
   | { type: 'workerReady' }
-  | { type: 'evalStarted';  toIndex: number }
+  | { type: 'evalStarted';  cellIndex: number; target: number }
   | { type: 'evalDone';     results: readonly EvalResultItem[] }
-  | { type: 'evalFailed';   toIndex: number; message: string };
+  | { type: 'evalFailed';   cellIndex: number; message: string };
 
 export type Action = UserAction | InternalAction;
 
@@ -63,7 +65,7 @@ export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
 
     case 'workerBooting':
-      return { ...state, worker: 'booting', computing: -1 };
+      return { ...state, worker: 'booting', computing: -1, target: -1 };
 
     case 'workerReady':
       return { ...state, worker: 'ready' };
@@ -112,8 +114,6 @@ export function reduce(state: AppState, action: Action): AppState {
     }
 
     case 'runAndAdvance': {
-      // State part only: add cell if needed, advance selection.
-      // The eval side effect is handled by the Store.
       const nextIdx = action.index + 1;
       if (nextIdx >= state.cells.length) {
         const cells = [...state.cells, freshCell()];
@@ -123,7 +123,7 @@ export function reduce(state: AppState, action: Action): AppState {
     }
 
     case 'evalStarted':
-      return { ...state, computing: action.toIndex };
+      return { ...state, computing: action.cellIndex, target: action.target };
 
     case 'evalDone': {
       const cells = state.cells.map((c, i) => {
@@ -136,20 +136,28 @@ export function reduce(state: AppState, action: Action): AppState {
           hasResult: true,
         };
       });
+      const evalUpTo = action.results.length - 1;
+      // If we've reached the target (or error stopped us short), clear both.
+      // Otherwise the Store will continue creeping.
+      const reachedTarget = evalUpTo >= state.target;
+      const hasError = action.results.length > 0 &&
+        action.results[action.results.length - 1].error != null;
+      const done = reachedTarget || hasError;
       return {
         ...state,
         cells,
-        computing: -1,
-        evalUpTo: action.results.length - 1,
+        computing: done ? -1 : state.computing,
+        target: done ? -1 : state.target,
+        evalUpTo,
       };
     }
 
     case 'evalFailed': {
       const cells = state.cells.map((c, i) =>
-        i === action.toIndex
+        i === action.cellIndex
           ? { ...c, result: action.message, isError: true, hasResult: true }
           : c);
-      return { ...state, cells, computing: -1, evalUpTo: action.toIndex };
+      return { ...state, cells, computing: -1, target: -1, evalUpTo: action.cellIndex };
     }
 
     // Side-effect-only actions — no state change in reducer.
@@ -201,10 +209,10 @@ export class Store {
     // Side effects
     switch (action.type) {
       case 'run':
-        this.requestEval(action.index);
+        this.runTo(action.index);
         break;
       case 'runAndAdvance':
-        this.requestEval(action.index);
+        this.runTo(action.index);
         break;
       case 'killWorker':
         this.killAndRespawn();
@@ -262,22 +270,33 @@ export class Store {
     });
   }
 
-  private async requestEval(toIndex: number): Promise<void> {
+  // Creep from evalUpTo+1 toward targetIndex, one cell at a time.
+  private async runTo(targetIndex: number): Promise<void> {
     if (this.state.computing >= 0) {
       this.killAndRespawn();
     }
 
     await this.waitForReady();
 
-    this.dispatch({ type: 'evalStarted', toIndex });
+    let step = this.state.evalUpTo + 1;
 
-    const prefix = this.state.cells.slice(0, toIndex + 1).map(c => c.code);
-    const msg = await this.sendEval(prefix);
+    while (step <= targetIndex) {
+      this.dispatch({ type: 'evalStarted', cellIndex: step, target: targetIndex });
 
-    if (msg.type === 'result') {
-      this.dispatch({ type: 'evalDone', results: msg.results });
-    } else {
-      this.dispatch({ type: 'evalFailed', toIndex, message: msg.message });
+      const prefix = this.state.cells.slice(0, step + 1).map(c => c.code);
+      const msg = await this.sendEval(prefix);
+
+      if (msg.type === 'result') {
+        this.dispatch({ type: 'evalDone', results: msg.results });
+      } else {
+        this.dispatch({ type: 'evalFailed', cellIndex: step, message: msg.message });
+        return;
+      }
+
+      // Stop if evalDone detected an error in results
+      if (this.state.target < 0) return;
+
+      step = this.state.evalUpTo + 1;
     }
   }
 }
