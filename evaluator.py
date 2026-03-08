@@ -9,7 +9,7 @@ If eval may be stuck in an infinite loop, the app will kill the worker and resta
 
 import json
 from dataclasses import dataclass
-from typing import Any, NewType, TypeAlias, Mapping
+from typing import Any, NewType, TypeAlias
 
 
 Code = NewType('Code', str)
@@ -43,17 +43,15 @@ class Worker:
     def evaluate(self, nb: Notebook) -> list[Result]:
         results: list[Result] = []
         globals: dict[str, Any] = {}
-        locals: Mapping[str, Any] = {}
         for c in nb.cells:
-            r = self.evaluate_cell(c, globals, locals)
+            r = self.evaluate_cell(c, globals)
             results.append(r)
             if isinstance(r, ErrorResult):
                 return results
         return results
 
     def evaluate_cell(self, c: Cell,
-                      globals: dict[str, Any],
-                      locals: Mapping[str, Any]) -> Result:
+                      globals: dict[str, Any]) -> Result:
         import io, sys, traceback
         buf = io.StringIO()
         sys.stdout, old = buf, sys.stdout
@@ -62,12 +60,12 @@ class Worker:
             if not s:
                 return EvalResult(text='')
             try:
-                v = eval(compile(s, '<cell>', 'eval'), globals, locals)
+                v = eval(compile(s, '<cell>', 'eval'), globals)
                 output = buf.getvalue()
                 text = output + (repr(v) if v is not None else '')
                 return EvalResult(text=text)
             except SyntaxError:
-                exec(compile(s, '<cell>', 'exec'), globals, locals)
+                exec(compile(s, '<cell>', 'exec'), globals)
                 return EvalResult(text=buf.getvalue())
         except Exception:
             return ErrorResult(message=traceback.format_exc())
