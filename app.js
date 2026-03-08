@@ -1,8 +1,16 @@
 import {
-  html, render, useState, useRef, useCallback, useEffect
+  html, render, useState, useRef, useEffect
 } from 'https://esm.sh/htm/preact/standalone';
 
 import { Store, INITIAL_STATE } from './viewmodel.js';
+
+import { EditorView, keymap, drawSelection } from 'https://esm.sh/@codemirror/view@6';
+import { Prec } from 'https://esm.sh/@codemirror/state@6';
+import { defaultKeymap, history, historyKeymap } from 'https://esm.sh/@codemirror/commands@6';
+import { syntaxHighlighting, bracketMatching } from 'https://esm.sh/@codemirror/language@6';
+import { closeBrackets, closeBracketsKeymap } from 'https://esm.sh/@codemirror/autocomplete@6';
+import { python } from 'https://esm.sh/@codemirror/lang-python@6';
+import { oneDarkHighlightStyle } from 'https://esm.sh/@codemirror/theme-one-dark@6';
 
 // ── Store singleton ─────────────────────────────────────────────────
 
@@ -19,6 +27,19 @@ function useStore() {
 function dispatch(action) {
   store.dispatch(action);
 }
+
+// ── CodeMirror theme ────────────────────────────────────────────
+
+const cmTheme = EditorView.theme({
+  '&': { background: '#0d1117' },
+  '.cm-scroller': { background: '#0d1117', fontFamily: "'Courier New', monospace", fontSize: '13px', lineHeight: '1.5' },
+  '.cm-content': { padding: '6px 10px', caretColor: '#c9d1d9' },
+  '&.cm-focused': { outline: 'none' },
+  '.cm-cursor': { borderLeftColor: '#c9d1d9' },
+  '.cm-activeLine': { background: 'transparent' },
+  '.cm-selectionBackground': { background: '#264f7866 !important' },
+  '&.cm-focused .cm-selectionBackground': { background: '#264f78 !important' },
+});
 
 // ── Components ──────────────────────────────────────────────────────
 
@@ -45,49 +66,74 @@ function ResultBox({ cell, fresh }) {
 }
 
 function CellRow({ cell, index, selected, computing, evalUpTo, target, workerStatus }) {
-  const taRef = useRef(null);
+  const containerRef = useRef(null);
+  const viewRef = useRef(null);
+  const indexRef = useRef(index);
+  indexRef.current = index;
   const fresh = index <= evalUpTo;
 
+  // Create CM6 editor on mount
   useEffect(() => {
-    if (selected && taRef.current && document.activeElement !== taRef.current) {
-      taRef.current.focus();
+    const notebookKeymap = Prec.highest(keymap.of([
+      { key: 'Alt-ArrowUp',   run: () => { dispatch({ type: 'selectUp' }); return true; } },
+      { key: 'Alt-ArrowDown', run: () => { dispatch({ type: 'selectDown' }); return true; } },
+      { key: 'Mod-Enter',     run: () => { dispatch({ type: 'run',           index: indexRef.current }); return true; } },
+      { key: 'Ctrl-Enter',    run: () => { dispatch({ type: 'run',           index: indexRef.current }); return true; } },
+      { key: 'Alt-Enter',     run: () => { dispatch({ type: 'runAndInsert',  index: indexRef.current }); return true; } },
+      { key: 'Shift-Enter',   run: () => { dispatch({ type: 'runAndAdvance', index: indexRef.current }); return true; } },
+      { key: 'Alt-Delete',    run: () => { dispatch({ type: 'deleteCell',    index: indexRef.current }); return true; } },
+      { key: 'Alt-Backspace', run: () => { dispatch({ type: 'deleteCell',    index: indexRef.current }); return true; } },
+      { key: 'Mod-Backspace', run: () => { dispatch({ type: 'killWorker' }); return true; } },
+      { key: 'Tab', run: view => {
+        const { from, to } = view.state.selection.main;
+        view.dispatch({ changes: { from, to, insert: '    ' }, selection: { anchor: from + 4 } });
+        return true;
+      }},
+    ]));
+
+    const view = new EditorView({
+      doc: cell.code,
+      extensions: [
+        notebookKeymap,
+        history(),
+        drawSelection(),
+        bracketMatching(),
+        closeBrackets(),
+        syntaxHighlighting(oneDarkHighlightStyle),
+        python(),
+        cmTheme,
+        keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
+        EditorView.updateListener.of(update => {
+          if (update.focusChanged && update.view.hasFocus) {
+            dispatch({ type: 'select', index: indexRef.current });
+          }
+          if (update.docChanged) {
+            dispatch({ type: 'setCode', index: indexRef.current, code: update.state.doc.toString() });
+          }
+        }),
+      ],
+      parent: containerRef.current,
+    });
+    viewRef.current = view;
+    return () => view.destroy();
+  }, []);
+
+  // Sync external code changes to editor
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const current = view.state.doc.toString();
+    if (current !== cell.code) {
+      view.dispatch({ changes: { from: 0, to: current.length, insert: cell.code } });
+    }
+  }, [cell.code]);
+
+  // Focus when selected
+  useEffect(() => {
+    if (selected && viewRef.current && !viewRef.current.hasFocus) {
+      viewRef.current.focus();
     }
   }, [selected]);
-
-  const rows = Math.max(1, (cell.code.match(/\n/g) || []).length + 1);
-
-  const onInput = useCallback(ev => {
-    dispatch({ type: 'setCode', index, code: ev.target.value });
-  }, [index]);
-
-  const onFocus = useCallback(() => {
-    dispatch({ type: 'select', index });
-  }, [index]);
-
-  const onKeyDown = useCallback(ev => {
-    const ctrl = ev.ctrlKey || ev.metaKey;
-    if (ev.key === 'Tab') {
-      ev.preventDefault();
-      const t = ev.target, s = t.selectionStart, en = t.selectionEnd;
-      t.value = t.value.slice(0, s) + '    ' + t.value.slice(en);
-      t.selectionStart = t.selectionEnd = s + 4;
-      dispatch({ type: 'setCode', index, code: t.value });
-    } else if (ev.altKey && ev.key === 'ArrowUp') {
-      ev.preventDefault(); dispatch({ type: 'selectUp' });
-    } else if (ev.altKey && ev.key === 'ArrowDown') {
-      ev.preventDefault(); dispatch({ type: 'selectDown' });
-    } else if (ctrl && ev.key === 'Enter') {
-      ev.preventDefault(); dispatch({ type: 'run', index });
-    } else if (ev.altKey && ev.key === 'Enter') {
-      ev.preventDefault(); dispatch({ type: 'runAndInsert', index });
-    } else if (ev.altKey && (ev.key === 'Delete' || ev.key === 'Backspace')) {
-      ev.preventDefault(); dispatch({ type: 'deleteCell', index });
-    } else if (ev.shiftKey && ev.key === 'Enter') {
-      ev.preventDefault(); dispatch({ type: 'runAndAdvance', index });
-    } else if (ctrl && ev.key === 'Backspace') {
-      ev.preventDefault(); dispatch({ type: 'killWorker' });
-    }
-  }, [index]);
 
   return html`
     <div class="cell">
@@ -95,15 +141,7 @@ function CellRow({ cell, index, selected, computing, evalUpTo, target, workerSta
         <${Snake} cellIndex=${index} computing=${computing} evalUpTo=${evalUpTo} target=${target} workerStatus=${workerStatus} />
       </div>
       <div class=${'cell-inner' + (selected ? ' selected' : '')}>
-        <textarea
-          ref=${taRef}
-          rows=${rows}
-          spellcheck=${false}
-          value=${cell.code}
-          onInput=${onInput}
-          onFocus=${onFocus}
-          onKeyDown=${onKeyDown}
-        />
+        <div ref=${containerRef}></div>
         <${ResultBox} cell=${cell} fresh=${fresh} />
       </div>
     </div>

@@ -15,14 +15,10 @@ body { font-family: 'Courier New', monospace; background: #0d1117; color: #c9d1d
 }
 .cell-inner { flex: 1; border: 2px solid transparent; border-radius: 6px; }
 .cell-inner.selected { border-color: #f0c040; }
-textarea {
-  display: block; width: 100%; padding: 6px 10px;
-  background: #0d1117; color: #c9d1d9;
+.cm-editor {
   border: 1px solid #30363d; border-radius: 4px;
-  font: 13px/1.5 'Courier New', monospace;
-  resize: none; overflow: hidden;
 }
-textarea:focus { outline: none; border-color: #58a6ff44; }
+.cm-editor.cm-focused { border-color: #58a6ff44; }
 .result {
   padding: 4px 10px 4px 12px; margin-top: 2px;
   font-size: 13px; line-height: 1.4;
