@@ -108,7 +108,7 @@ function App() {
   if (!state.ready) return html`<div class="loading-msg">Loading Python \u{1F40D}</div>`;
 
   return html`
-    <div id="notebook" class=${state.computing >= 0 ? 'busy' : ''}>
+    <div id="notebook">
       ${state.cells.map((cell, i) => html`
         <${CellRow}
           key=${i}

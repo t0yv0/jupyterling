@@ -42,4 +42,3 @@ button:hover { background: #30363d; }
   max-width: 900px; margin: 40px auto; padding: 0 20px;
   font-size: 1.3em; color: #c9d1d9;
 }
-#notebook.busy { pointer-events: none; opacity: 0.85; }
