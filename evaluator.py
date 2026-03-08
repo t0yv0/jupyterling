@@ -7,6 +7,7 @@ Subsequent versions will cache in-memory a little bit to speed up.
 If eval may be stuck in an infinite loop, the app will kill the worker and restart.
 """
 
+import json
 from dataclasses import dataclass
 from typing import Any, NewType, TypeAlias, Mapping
 
@@ -72,3 +73,15 @@ class Worker:
             return ErrorResult(message=traceback.format_exc())
         finally:
             sys.stdout = old
+
+
+def evaluate_json(cells_json: str) -> list[dict[str, str]]:
+    """Entry point called from worker.js. Takes JSON array of code strings,
+    returns list of dicts with 'text' or 'error' key."""
+    codes = json.loads(cells_json)
+    nb = Notebook(cells=[Cell(code=Code(c)) for c in codes])
+    results = Worker().evaluate(nb)
+    return [
+        {'text': r.text} if isinstance(r, EvalResult) else {'error': r.message}
+        for r in results
+    ]
