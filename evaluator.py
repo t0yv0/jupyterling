@@ -44,17 +44,31 @@ class Worker:
         globals: dict[str, Any] = {}
         locals: Mapping[str, Any] = {}
         for c in nb.cells:
-            r = self.evalute_cell(c, globals, locals)
+            r = self.evaluate_cell(c, globals, locals)
             results.append(r)
             if isinstance(r, ErrorResult):
                 return results
         return results
 
-    def evalute_cell(self, c: Cell,
-                     globals: dict[str, Any],
-                     locals: Mapping[str, Any]) -> Result:
+    def evaluate_cell(self, c: Cell,
+                      globals: dict[str, Any],
+                      locals: Mapping[str, Any]) -> Result:
+        import io, sys, traceback
+        buf = io.StringIO()
+        sys.stdout, old = buf, sys.stdout
         try:
-            value = eval(c.code, locals=locals, globals=globals)
-            return EvalResult(text=str(value))
-        except Exception as e:
-            return ErrorResult(message=str(e))
+            s = c.code.strip()
+            if not s:
+                return EvalResult(text='')
+            try:
+                v = eval(compile(s, '<cell>', 'eval'), globals, locals)
+                output = buf.getvalue()
+                text = output + (repr(v) if v is not None else '')
+                return EvalResult(text=text)
+            except SyntaxError:
+                exec(compile(s, '<cell>', 'exec'), globals, locals)
+                return EvalResult(text=buf.getvalue())
+        except Exception:
+            return ErrorResult(message=traceback.format_exc())
+        finally:
+            sys.stdout = old
